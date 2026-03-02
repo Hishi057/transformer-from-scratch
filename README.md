@@ -4,6 +4,10 @@ https://nlp.seas.harvard.edu/annotated-transformer/
 
 この資料をもとに、transformerをスクラッチ実装してみる。
 
+## 注意点
+
+1. torchtextは開発が中止されているので、他ので置き換えて対応しています。
+
 ## テンソルの形状
 
 このtransformerの実装およびpytorch(自然言語処理？)において、データは以下の形式でやりとりされる。

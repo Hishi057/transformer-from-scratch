@@ -9,10 +9,7 @@ import time
 from torch.optim.lr_scheduler import LambdaLR
 import pandas as pd
 import altair as alt
-# from torchtext.data.functional import to_map_style_dataset
 from torch.utils.data import DataLoader
-# from torchtext.vocab import build_vocab_from_iterator
-# import torchtext.datasets as datasets
 import spacy
 import GPUtil
 import warnings
