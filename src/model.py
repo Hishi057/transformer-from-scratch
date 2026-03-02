@@ -9,10 +9,10 @@ import time
 from torch.optim.lr_scheduler import LambdaLR
 import pandas as pd
 import altair as alt
-from torchtext.data.functional import to_map_style_dataset
+# from torchtext.data.functional import to_map_style_dataset
 from torch.utils.data import DataLoader
-from torchtext.vocab import build_vocab_from_iterator
-import torchtext.datasets as datasets
+# from torchtext.vocab import build_vocab_from_iterator
+# import torchtext.datasets as datasets
 import spacy
 import GPUtil
 import warnings
@@ -20,7 +20,7 @@ from torch.utils.data.distributed import DistributedSampler
 import torch.distributed as dist
 import torch.multiprocessing as mp
 from torch.nn.parallel import DistributedDataParallel as DDP
-from utils import clones
+from utils import clones, show_example
 
 # Set to False to skip notebook execution (e.g. for debugging)
 warnings.filterwarnings("ignore")
@@ -41,13 +41,14 @@ class EncoderDecoder(nn.Module):
         return self.decode(self.encode(src, src_mask), src_mask, tgt, tgt_mask)
     
     def encode(self, src, src_mask):
-        return self.encoder(src, src_mask)
+        return self.encoder(self.src_embed(src), src_mask)
     def decode(self, memory, src_mask, tgt, tgt_mask):
         return self.decoder(self.tgt_embed(tgt), memory, src_mask, tgt_mask)
 
 # 最後の出力
 class Generator(nn.Module):
     def __init__(self, d_model, vocab):
+        super(Generator, self).__init__()
         self.proj = nn.Linear(d_model, vocab)
     
     # nn.Linearによって、三次元目だけ単語ベクトルから、それぞれの単語IDについての確率に変換される
@@ -89,13 +90,13 @@ class SublayerConnection(nn.Module):
         self.dropout = nn.Dropout(dropout)
     
     def forward(self, x, sublayer):
-        return x + self.dropout(self.sublayer(self.norm(x)))
+        return x + self.dropout(sublayer(self.norm(x)))
 
 # エンコーダー層
 class EncoderLayer(nn.Module):
     def __init__(self, size, self_attn, feed_forward, dropout):
         super(EncoderLayer, self).__init__()
-        self.self_attn = self.self_attn
+        self.self_attn = self_attn
         self.feed_forward = feed_forward
         self.sublayer = clones(SublayerConnection(size, dropout), 2)
         self.size = size
@@ -110,7 +111,7 @@ class EncoderLayer(nn.Module):
 class Decoder(nn.Module):
     def __init__(self, layer, N):
         super(Decoder, self).__init__()
-        self.layers = layer
+        self.layers = clones(layer, N)
         self.norm = LayerNorm(layer.size)
     
     def forward(self, x, memory, src_mask,tgt_mask):
@@ -149,7 +150,7 @@ def attention(query, key, value, mask=None, dropout=None):
     p_attn = scores.softmax(dim=-1)
     if dropout is not None:
         p_attn = dropout(p_attn)
-    return torch.mathmul(p_attn, value), p_attn
+    return torch.matmul(p_attn, value), p_attn
 
 # マルチヘッド
 # あんまりここ理解できてないかも
@@ -174,7 +175,7 @@ class MultiHeadedAttention(nn.Module):
         ]
 
         x, self_attn = attention(
-            query, key, value, mask=mask, drop=self.dropout
+            query, key, value, mask=mask, dropout=self.dropout
         )
 
         x = (
@@ -186,3 +187,90 @@ class MultiHeadedAttention(nn.Module):
         del key
         del value
         return self.linears[-1](x)
+
+class PositionwiseFeedForward(nn.Module):
+    def __init__(self, d_model, d_ff, dropout=0.1):
+        super(PositionwiseFeedForward, self).__init__()
+        self.w_1 = nn.Linear(d_model, d_ff)
+        self.w_2 = nn.Linear(d_ff, d_model)
+        self.dropout = nn.Dropout(dropout)
+    
+    def forward(self, x):
+        return self.w_2(self.dropout(self.w_1(x).relu()))
+
+# 単語ID -> 単語ベクトル の変換
+class Embeddings(nn.Module):
+    def __init__(self, d_model, vocab):
+        super(Embeddings, self).__init__()
+        self.lut = nn.Embedding(vocab, d_model)
+        self.d_model = d_model
+
+    def forward(self, x):
+        return self.lut(x) * math.sqrt(self.d_model)
+
+# 位置情報の付加
+class PositionalEncoding(nn.Module):
+    def __init__(self, d_model, dropout, max_len = 5000):
+        super(PositionalEncoding, self).__init__()
+        self.dropout = nn.Dropout(p=dropout)
+        pe = torch.zeros(max_len, d_model)
+        position = torch.arange(0, max_len).unsqueeze(1)
+        div_term = torch.exp(
+            torch.arange(0, d_model, 2) * -(math.log(10000) / d_model)
+        )
+        pe[:, 0::2] = torch.sin(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term)
+        pe = pe.unsqueeze(0)
+        self.register_buffer("pe", pe)
+    
+    def forward(self, x):
+        x = x + self.pe[:, : x.size(1)].requires_grad_(False)
+        return self.dropout(x)
+
+def make_model(
+        src_vocab, tgt_vocab, N=6, d_model=512, d_ff=2048, h=8, dropout=0.1
+):
+    c = copy.deepcopy
+    attn = MultiHeadedAttention(h, d_model)
+    ff = PositionwiseFeedForward(d_model, d_ff, dropout)
+    position = PositionalEncoding(d_model, dropout)
+    model = EncoderDecoder(
+        Encoder(EncoderLayer(d_model, c(attn), c(ff), dropout), N),
+        Decoder(DecoderLayer(d_model, c(attn), c(attn), c(ff), dropout), N),
+        nn.Sequential(Embeddings(d_model, src_vocab), c(position)),
+        nn.Sequential(Embeddings(d_model, tgt_vocab), c(position)),
+        Generator(d_model, tgt_vocab)
+    )
+
+    for p in model.parameters():
+        if p.dim() > 1:
+            nn.init.xavier_uniform_(p)
+    return model
+
+def inference_test():
+    test_model = make_model(11, 11, 2)
+    test_model.eval()
+    src = torch.LongTensor([[1,2,3,4,5,6,7,8,9,10]])
+    src_mask = torch.ones(1, 1, 10)
+
+    memory = test_model.encode(src, src_mask)
+    ys = torch.zeros(1, 1).type_as(src)
+
+    for i in range(10):
+        out = test_model.decode(
+            memory, src_mask, ys, subsequent_mask(ys.size(1)).type_as(src.data)
+        )
+        prob = test_model.generator(out[:, -1])
+        _, next_word = torch.max(prob, dim=1)
+        next_word = next_word.data[0]
+        ys = torch.cat(
+            [ys, torch.empty(1, 1).type_as(src.data).fill_(next_word)], dim=1
+        )
+    
+    print("Example Untrained Model Prediction:", ys)
+
+def run_tests():
+    for _ in range(10):
+        inference_test()
+
+show_example(run_tests())
