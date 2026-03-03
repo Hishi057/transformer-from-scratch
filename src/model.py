@@ -270,4 +270,5 @@ def run_tests():
     for _ in range(10):
         inference_test()
 
-show_example(run_tests())
+if __name__ == "__main__":
+    show_example(run_tests())
