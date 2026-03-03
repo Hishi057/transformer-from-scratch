@@ -3,7 +3,7 @@ from torch.optim.lr_scheduler import LambdaLR
 from utils import execute_example, DummyOptimizer, DummyScheduler
 
 class Batch:
-    def __init__(self, src, tgt=None, pad=2):
+    def __init__(self, src, tgt=None, pad=0):
         self.src = src
         self.src_mask = (src != pad).unsqueeze(-2)
         if tgt is not None:
@@ -65,7 +65,7 @@ def run_epoch(
             elapsed = time.time() - start
             print(
                 (
-                    "Epoch Step: %6d | Accumulation Step: %3d | Loss: %6.2f "
+                    "Epoch Step: %6d | Accumulation Step: %3d | Loss: %6.4f "
                     + "| Tokens / Sec: %7.1f | Learning Rate: %6.1e"
                 )
                 % (i, n_accum, loss / batch.ntokens, tokens / elapsed, lr)
@@ -107,15 +107,29 @@ class LabelSmoothing(nn.Module):
 
 #
 # First Exmaple
-# 俗にいうコピータスク
 #
 def data_gen(V, batch_size, nbatches):
+    # yield from data_gen_copy(V, batch_size, nbatches)
+    yield from data_gen_sort(V, batch_size, nbatches)
+
+# コピータスク
+def data_gen_copy(V, batch_size, nbatches):
     for i in range(nbatches):
-        data = torch.randint(1, V, size=(batch_size, 24))
+        data = torch.randint(2, V, size=(batch_size, 10))
         data[:, 0] = 1
         src = data.requires_grad_(False).clone().detach()
         tgt = data.requires_grad_(False).clone().detach()
-        yield Batch(src, tgt, 0)
+        yield Batch(src, tgt, pad=0)
+
+# ソートタスク
+def data_gen_sort(V, batch_size, nbatches):
+    for i in range(nbatches):
+        current_len = torch.randint(5, 15, (1,)).item()
+        body = torch.randint(2, V, size=(batch_size, current_len))
+        src = torch.cat([torch.ones(batch_size, 1).long(), body], dim=1)
+        body_sorted = torch.sort(body, dim=1)[0]
+        tgt = torch.cat([torch.ones(batch_size, 1).long(), body_sorted], dim=1)
+        yield Batch(src, tgt, pad=0)
 
 class SimpleLossCompute:
     def __init__(self, generator, criterion):
@@ -146,25 +160,25 @@ def greedy_decode(model, src, src_mask, max_len, start_symbol):
 
     return ys
 
-def example_simple_model():
+def example_simple_model(epoch=50):
     V = 11
     criterion = LabelSmoothing(size=V, padding_idx=0, smoothing=0.0)
-    model = make_model(V, V, N=3)
+    model = make_model(V, V, N=2, d_model=128, d_ff=512, h=8)
 
     optimizer = torch.optim.Adam(
-        model.parameters(), lr = 0.5, betas = (0.9, 0.98), eps=1e-9
+        model.parameters(), lr = 1.0, betas = (0.9, 0.98), eps=1e-9
     )
     lr_scheduler = LambdaLR(
         optimizer=optimizer,
         lr_lambda=lambda step: rate(
-            step, model_size=model.src_embed[0].d_model, factor=1.0, warmup=400
+            step, model_size=model.src_embed[0].d_model, factor=1.0, warmup=100
         ),
     )
 
     # 学習
-    batch_size = 32
-    for epoch in range(10):
-        print("Epoch : ", epoch)
+    batch_size = 64
+    for e in range(epoch):
+        print("Epoch : ", e)
         model.train()
         run_epoch(
             data_gen(V, batch_size, 50),
@@ -186,26 +200,26 @@ def example_simple_model():
     
     model.eval()
 
-    srcs = [torch.LongTensor([[1,2,3,4,5]]), 
-            torch.LongTensor([[1, 3, 5, 7, 9]]),
-            torch.LongTensor([[1, 1, 1, 1, 1]]),
-            torch.LongTensor([[1, 2, 3, 4, 5, 6, 7, 8, 9]]),
-            torch.LongTensor([[1, 2, 3, 4, 5, 6, 7, 8, 9, 8, 7, 6, 5, 4, 3, 2, 1]]),
-            torch.LongTensor([[1, 1, 2, 2, 3, 3, 4, 4, 5, 5]]),
-            torch.LongTensor([[1, 5, 1, 5, 1, 5, 1, 5, 1 , 5, 1, 5, 1, 5, 1, 5]]),
-            torch.LongTensor([[1, 9, 8, 7, 6, 5, 4, 3, 2, 1, 9, 7, 5, 3, 1, 9, 6, 3]]),
-            torch.LongTensor([[1, 3, 6, 3, 7, 8, 3, 7, 1, 8, 9, 4, 3, 7, 1, 3, 3, 6, 8, 2]]),
+    srcs = [torch.LongTensor([[2,3,4,5]]), 
+            torch.LongTensor([[5,3,4,2]]), 
+            torch.LongTensor([[9,8,7,6,5]]), 
+            torch.LongTensor([[2,5,4,3,6,7,8]]), 
+            torch.LongTensor([[2,5,4,3,6,7,8]]), 
+            torch.LongTensor([[3,5,7,2,4,8,9,6]]), 
+            torch.LongTensor([[5,4,3,3,4,2,2,5]]), 
+            torch.LongTensor([[2,3,5,4,8,7,6,9,7,8,6,5,2,3,4]]), 
             ]
     
     counter = 0
-    for src in srcs:
+    for src_body in srcs:
+        src =  torch.cat([torch.ones(1, 1).long(), src_body], dim=1)
         max_len = src.shape[1]
         src_mask = torch.ones(1, 1, max_len)
-        print("\n入力: ", src)
-        print("出力: ", greedy_decode(model, src, src_mask, max_len=max_len, start_symbol=1))
+        print("\n入力: ", src.tolist())
+        print("出力: ", greedy_decode(model, src, src_mask, max_len=max_len, start_symbol=1).tolist())
 
 if __name__ == "__main__":
     # execute_example(example_simple_model)
     print("学習を開始します...") 
-    example_simple_model()
+    example_simple_model(epoch=20)
     print("学習が終了しました。")
